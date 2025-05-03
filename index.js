@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
+const { body, validationResult } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 const PhotizoModel = require('./models/models');
 
 const app = express();
@@ -23,14 +25,29 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// Rate limiting setup for registration route
+const registerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // Limit each IP to 10 registration requests
+  message: "Too many requests, please try again later."
+});
+
 // Register route
-app.post('/register', async (req, res) => {
-  const { name, email, phone, nationality, state, role } = req.body;
-  
-  // Check if all fields are present
-  if (!name || !email || !phone || !nationality || !state || !role) {
-    return res.status(400).json({ error: "All fields are required." });
+app.post('/register', [
+  // Validation checks using express-validator
+  body('name').notEmpty().withMessage('Name is required.'),
+  body('email').isEmail().withMessage('Valid email is required.'),
+  body('phone').notEmpty().withMessage('Phone number is required.'),
+  body('nationality').notEmpty().withMessage('Nationality is required.'),
+  body('state').notEmpty().withMessage('State is required.'),
+  body('role').notEmpty().withMessage('Role is required.')
+], registerLimiter, async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
   }
+
+  const { name, email, phone, nationality, state, role } = req.body;
 
   try {
     // Check if the email already exists in the database
@@ -44,8 +61,8 @@ app.post('/register', async (req, res) => {
       name, email, phone, nationality, state, role,
     });
 
-    // Prepare the email options to send
-    const mailOptions = {
+    // Prepare the email options to notify admin
+    const mailOptionsToAdmin = {
       from: process.env.EMAIL_USER,
       to: process.env.ADMIN_EMAIL,  // Admin email to receive registration details
       subject: 'New Volunteer Registration - Photizo Foundation',
@@ -60,13 +77,32 @@ app.post('/register', async (req, res) => {
       `
     };
 
-    // Send the email with registration details
-    await transporter.sendMail(mailOptions);
+    // Prepare the confirmation email options to send to user
+    const mailOptionsToUser = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: "You're Registered – Photizo Foundation",
+      html: `
+        <h3>Welcome, ${name}!</h3>
+        <p>Thank you for registering as a volunteer. We'll contact you soon.You can call this number too 08065699704</p>
+      `
+    };
 
-    // Return successful response
+    // Send the emails asynchronously (in the background)
+    const emailPromises = [
+      transporter.sendMail(mailOptionsToAdmin),
+      transporter.sendMail(mailOptionsToUser)
+    ];
+
+    // Respond immediately to the client before emails are sent
     res.status(201).json({
       message: "Registration successful! We have sent an email with the details.",
       record,
+    });
+
+    // Execute email sending in the background
+    Promise.all(emailPromises).catch(err => {
+      console.error("Error sending email:", err);
     });
 
   } catch (err) {
